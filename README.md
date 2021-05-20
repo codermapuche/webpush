@@ -29,7 +29,7 @@ await wp.push(id, sub, notify);
 ## Why?
 
 Why with less than 250 lines and zero dependecies is a good alternative to:
-
+```
 cloc https://github.com/web-push-libs/web-push 
 
       18 dependecies.
@@ -50,3 +50,4 @@ YAML                             2              0              0             12
 -------------------------------------------------------------------------------
 SUM:                           103           1514           1067          10307
 -------------------------------------------------------------------------------
+```
