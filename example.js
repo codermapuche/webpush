@@ -34,7 +34,7 @@ const API = {
 		vapid.cert = await fs.readFile(vapid.cert, 'ascii');
 	} catch (e) {
 		// 1. Generate new vapid credentials.
-		let keys = wp.vapid();
+		let keys = wp.VAPID_generateKeys();
 
 		await fs.writeFile(vapid.key, keys.key);
 		await fs.writeFile(vapid.cert, keys.cert);
