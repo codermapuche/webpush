@@ -1,20 +1,22 @@
 # webpush
-Zero dependecies, working webpush in less than 250 lines of code
+Zero dependecies, working webpush in less than 300 lines of code
 
 
 ## Test
 Just run _node example.js_
+Open 127.0.0.1
 
 ## API
 
 ```javascript
 
-const wp = require('webpush');
+const wp = require('webpush'),
+			fsp = require('fs').promises;
 
 // Generate new keypair of key and cert for server
 //   we need to do this one time and store for reuse
 //   like a HTTPS certificates files, for be clear.
-let id = wp.vapid();
+let id = wp.VAPID_generateKeys();
 await fsp.writeFile('private.key', id.key);
 await fsp.writeFile('www/vapid.cert', id.cert);
 
@@ -28,7 +30,7 @@ await wp.push(id, sub, notify);
 
 ## Why?
 
-Why with less than 250 lines and zero dependecies is a good alternative to:
+Why with less than 300 lines and zero dependecies is a good alternative to:
 ```
 cloc https://github.com/web-push-libs/web-push 
 

@@ -31,14 +31,22 @@ function HMAC_hash(key, input) {
 }
 
 // ------------------------------------------------------------------------
+// https://datatracker.ietf.org/doc/html/rfc5869#section-2.2
+// ------------------------------------------------------------------------
+
+function HKDF_extract(key, input) {
+	return HMAC_hash(key, input);
+}
+
+// ------------------------------------------------------------------------
 // https://datatracker.ietf.org/doc/html/rfc7515#appendix-C
 // ------------------------------------------------------------------------
 
 function base64urlencode(buff) {
 	return buff.toString('base64')
     .split("=")[0]
-    .replace("+", "-")
-    .replace("/", "_");
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
 }
 
 // ------------------------------------------------------------------------
@@ -65,28 +73,31 @@ function VAPID_generateKeys() {
 }
 
 function VAPID_jwt(key, audience, subject, expire) {
+	var curr = new Date(),
+			offs = curr.getTimezoneOffset();
+
 	const header = {
 					typ: 'JWT',
 					alg: 'ES256'
 				},
 				payload = {
 					aud: audience.protocol + '//' + audience.host,
-					exp: (Date.now() + expire * 1000) / 1000,
+					exp: (Date.now() - offs + expire * 1000) / 1000,
 					sub: subject
 				};
 
 	return JWT_create(key, header, payload);
 }
 
-function VAPID_request(audience, cipher, jwt, cert) {
+function VAPID_request(endpoint, cipher, jwt, cert) {
 
 	const options = {
 		method: 'POST',
-		host: audience.host,
-		path: audience.path,
+		host: endpoint.host,
+		path: endpoint.path,
 		headers: {
-			'TTL'							: TTL,
-			'Content-Encoding': CONTENT_ENCODING,
+			'TTL'							: 1000 * 60,
+			'Content-Encoding': 'aes128gcm',
 			'Content-Type'		: 'application/octet-stream',
 			'Content-Length'	: cipher.length,
 			'Authorization'		: 'vapid t=' + jwt + ', k=' + cert
@@ -103,7 +114,10 @@ function VAPID_request(audience, cipher, jwt, cert) {
 
       const chunks = [];
       resp.on("data", (chunk) => (chunks.push(chunk)));
-      resp.on("end", () => (res(Buffer.concat(chunks).toString())));
+      resp.on("end", () => {
+				const body = Buffer.concat(chunks).toString();
+				res(body);
+			});
     });
 
     req.on("error", rej);
@@ -146,14 +160,25 @@ function JWS_sign(header, payload, key) {
 }
 
 // ------------------------------------------------------------------------
+// https://datatracker.ietf.org/doc/html/rfc4086
+// ------------------------------------------------------------------------
 
-const CONTENT_ENCODING = "aes128gcm",
-			AES_GCM = 'aes-128-gcm',
-			KEY_LENGTH = 16,
-			TAG_LENGTH = 16,
-			SHA_256_LENGTH = 32,
-			NONCE_LENGTH = 12,
-			TTL = 1000 * 60;
+function RANDOM_salt(length) {
+	return crypto.randomBytes(length);
+}
+
+// ------------------------------------------------------------------------
+// SECG, "SEC 1: Elliptic Curve Cryptography", Version 2.0,
+// May 2009, <http://www.secg.org/>.
+// ------------------------------------------------------------------------
+
+function ECDH(c_private, c_public) {
+	return c_private.computeSecret(c_public);
+}
+
+// ------------------------------------------------------------------------
+// https://datatracker.ietf.org/doc/html/rfc8188#section-2.3
+// ------------------------------------------------------------------------
 
 function generateNonce(base, counter) {
 	var nonce = Buffer.from(base);
@@ -164,100 +189,89 @@ function generateNonce(base, counter) {
 	return nonce;
 }
 
+// ------------------------------------------------------------------------
+// https://datatracker.ietf.org/doc/html/rfc8291#section-4
+// ------------------------------------------------------------------------
+
+const RECORD_SIZE = 4096,
+			AES_GCM 		= 'aes-128-gcm',
+			OVERHEAD 		= 16 + 1;
+
+// ------------------------------------------------------------------------
+
 function push(pub, sub, data) {
 
 	data = Buffer.from(JSON.stringify(data));
 
-	// ------------------------------------------------------------------------
-
-	let curve = crypto.createECDH('prime256v1');
-	curve.generateKeys();
-
-	// ------------------------------------------------------------------------
-
-	let salt = crypto.randomBytes(KEY_LENGTH),
-			params = {
-				version		: CONTENT_ENCODING,
-				dh				: sub.p256dh,
-				salt			: salt,
-				authSecret: sub.auth
-			},
-			header = {
-				rs: 4096,
-				salt: params.salt,
-				dh: Buffer.from(params.dh, 'base64'),
-				authSecret: Buffer.from(params.authSecret, 'base64'),
-				keyid: curve.getPublicKey()
-			};
-
-	let ints = Buffer.alloc(5);
-	ints.writeUIntBE(header.rs, 0, 4);
-	ints.writeUIntBE(header.keyid.length, 4, 1);
-	var cipher = Buffer.concat([ header.salt, ints, header.keyid ]);
-
-	let secret = HKDF_expand(
-								HMAC_hash(header.authSecret, curve.computeSecret(header.dh)),
-								Buffer.concat([
-									Buffer.from('WebPush: info\0'),
-									header.dh,
-									curve.getPublicKey()
-								]),
-								SHA_256_LENGTH),
-			hmac = HMAC_hash(header.salt, secret),
-			key = {
-				key  : HKDF_expand(hmac, 'Content-Encoding: ' + CONTENT_ENCODING + '\0', KEY_LENGTH),
-				nonce: HKDF_expand(hmac, 'Content-Encoding: nonce\0', NONCE_LENGTH)
-			};
-
-	var start = 0;
-	var overhead = 1 + TAG_LENGTH;
-
-	var counter = 0;
-	var last = false;
-	while (!last) {
-		var end = start + header.rs - overhead;
-		last = end >= data.length;
-
-		let buffer = data.slice(start, end),
-				nonce = generateNonce(key.nonce, counter),
-				gcm = crypto.createCipheriv(AES_GCM, key.key, nonce),
-				chunks = [],
-				padding = Buffer.alloc(1);
-
-		padding.fill(0);
-
-		chunks.push(gcm.update(buffer));
-		padding.writeUIntBE(last ? 2 : 1, 0, 1);
-		chunks.push(gcm.update(padding));
-
-		gcm.final();
-		var tag = gcm.getAuthTag();
-		if (tag.length !== TAG_LENGTH) {
-			throw new Error('invalid tag generated');
-		}
-		chunks.push(tag);
-
-		cipher = Buffer.concat([ cipher, Buffer.concat(chunks) ]);
-
-		start = end;
-		counter++;
+	if (RECORD_SIZE - OVERHEAD <= data.length) {
+		throw "Max data size of push is: " + (RECORD_SIZE - OVERHEAD);
 	}
 
 	// ------------------------------------------------------------------------
+	// https://datatracker.ietf.org/doc/html/rfc8291#section-2
+	// ------------------------------------------------------------------------
 
-	const audience = url.parse(sub.endpoint),
-				jwt = VAPID_jwt(pub.key, audience, pub.subject, 12 * 60 * 60);
+	let curve = crypto.createECDH('prime256v1'),
+			salt = RANDOM_salt(16),
+			keyid;
+
+	curve.generateKeys();
+	keyid = curve.getPublicKey();
+
+	// ------------------------------------------------------------------------
+	// https://datatracker.ietf.org/doc/html/rfc8291#section-3.4
+	// ------------------------------------------------------------------------
+
+	let ua_public   = Buffer.from(sub.p256dh, 'base64'),
+			ecdh_secret = ECDH(curve, ua_public),
+			auth_secret = Buffer.from(sub.auth, 'base64'),
+			PRK_key  		= HKDF_extract(auth_secret, ecdh_secret),
+			key_str	    = Buffer.from('WebPush: info\0'),
+			key_info 		= Buffer.concat([ key_str, ua_public, keyid ]),
+			IKM 		 		= HKDF_expand(PRK_key, key_info, 32),
+			PRK         = HKDF_extract(salt, IKM),
+			cek_info 	  = Buffer.from('Content-Encoding: aes128gcm\0'),
+			CEK 		 		= HKDF_expand(PRK, cek_info, 16),
+			nonce_info 	= Buffer.from('Content-Encoding: nonce\0'),
+      NONCE 			= HKDF_expand(PRK, nonce_info, 12);
+
+	// ------------------------------------------------------------------------
+	// https://datatracker.ietf.org/doc/html/rfc8188#section-2.1
+	// ------------------------------------------------------------------------
+
+	let ecch = Buffer.alloc(5);
+	ecch.writeUIntBE(RECORD_SIZE, 0, 4);
+	ecch.writeUIntBE(keyid.length, 4, 1);
+	ecch = Buffer.concat([ salt, ecch, keyid ]);
+
+	// ------------------------------------------------------------------------
+	// https://datatracker.ietf.org/doc/html/rfc8291#appendix-A
+	// ------------------------------------------------------------------------
+
+	let nonce  = generateNonce(NONCE, 0),
+			cipher = crypto.createCipheriv(AES_GCM, CEK, nonce);
+
+	data = Buffer.concat([ data, Buffer.from([ 2 ]) ]);
+	data = cipher.update(data);
+	cipher.final();
 
 	// ------------------------------------------------------------------------
 
-	return VAPID_request(audience, cipher, jwt, pub.cert);
+	const endpoint = url.parse(sub.endpoint),
+				jwt = VAPID_jwt(pub.key, endpoint, pub.subject, 12 * 60 * 60);
+
+	cipher = Buffer.concat([ ecch, data, cipher.getAuthTag() ]);
+
+	// ------------------------------------------------------------------------
+
+	return VAPID_request(endpoint, cipher, jwt, pub.cert);
 }
 
-// ------------------------------------------------------------------------
+// --------------------------------------------------------------------------
 
 module.exports = {
 	VAPID_generateKeys,
 	push
 }
 
-// ------------------------------------------------------------------------
+// --------------------------------------------------------------------------
