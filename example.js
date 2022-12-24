@@ -1,4 +1,4 @@
-const fs      = require('fs').promises,
+const fs      = require('fs'),
       http    = require('http'),
       path    = require('path'),
       url     = require('url'),
@@ -30,8 +30,8 @@ const API = {
   
   try {
     let keys = {
-      key : await fs.readFile(vapid.key,  'ascii'),
-      cert: await fs.readFile(vapid.cert, 'ascii')      
+      key : fs.readFileSync(vapid.key,  'ascii'),
+      cert: fs.readFileSync(vapid.cert, 'ascii')      
     }
     
     vapid.key  = keys.key;
@@ -42,8 +42,8 @@ const API = {
     // 1. Generate new vapid credentials.
     let keys = wp.VAPID_generateKeys();
 
-    await fs.writeFile(vapid.key, keys.key);
-    await fs.writeFile(vapid.cert, keys.cert);
+    fs.writeFileSync(vapid.key, keys.key);
+    fs.writeFileSync(vapid.cert, keys.cert);
 
     vapid.key = keys.key;
     vapid.cert = keys.cert;
@@ -99,7 +99,7 @@ http.createServer(async (request, response) => {
         ext      = request.url.split('.').pop();
 
     try {
-      content = await fs.readFile(path.join(__dirname, "www", request.url));
+      content = fs.readFileSync(path.join(__dirname, "www", request.url));
       response.setHeader('Content-Type', mimes[ext]);
     } catch (e) {
       result.error = true;
