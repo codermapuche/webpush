@@ -42,12 +42,14 @@ function HKDF_extract(key, input) {
 // https://datatracker.ietf.org/doc/html/rfc7515#appendix-C
 // ------------------------------------------------------------------------
 
-function base64urlEncode(str) {
-  return base64urlEscape(Buffer.from(str).toString('base64'));
+function base64urlEncode(buff) {
+  return buff.toString('base64')
+		.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 }
 
-function base64urlEscape(str) {
-  return str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+function base64urlDecode(str) {
+	str = str.replace(/\-/g, '+').replace(/_/g, '/');
+  return Buffer.from(str, 'base64');
 }
 
 // ------------------------------------------------------------------------
@@ -101,7 +103,7 @@ function VAPID_jwt(key, audience, subject, expire) {
 // ------------------------------------------------------------------------
 
 function VAPID_request(endpoint, cipher, jwt, cert) {
-  
+
   const options = {
     method: 'POST',
     host: endpoint.host,
@@ -164,8 +166,43 @@ function JWT_create(key, header, payload) {
 // https://datatracker.ietf.org/doc/html/rfc7515
 // ------------------------------------------------------------------------
 
-function JWS_sign(header, payload, privateKey) {
-  return crypto.sign("SHA256", header + '.' + payload, privateKey);
+function JWS_sign(header, payload, jwk) {
+	// NODE >= v13.2.0, v12.16.0
+	// https://nodejs.org/api/crypto.html#cryptosignalgorithm-data-key-callback
+  // privateKey.dsaEncoding = 'ieee-p1363'; 
+	// return crypto.sign('SHA256', header + '.' + payload, privateKey);
+	
+	// NODE < v12.16.0	
+	const sign = crypto.createSign('SHA256');
+	sign.write(header + '.' + payload);
+	sign.end();
+	
+	// JWK -> PEM (ECDH P-256)
+	let EC_PRIVATE	= Buffer.from('30770201010420' +
+											base64urlDecode(jwk.key.d).toString('hex') +
+											'A00A06082A8648CE3D030107A14403420004' +
+											base64urlDecode(jwk.key.x).toString('hex') +
+											base64urlDecode(jwk.key.y).toString('hex'), 'hex');
+										 
+	EC_PRIVATE 			=	'-----BEGIN EC PRIVATE KEY-----\n' +
+										EC_PRIVATE.toString('base64') + '\n' +
+										'-----END EC PRIVATE KEY-----';
+
+	let signature = sign.sign(EC_PRIVATE, 'hex');
+
+  // ----------------------------------------------------------------------
+  // https://datatracker.ietf.org/doc/html/rfc5349.html#section-7
+  // ----------------------------------------------------------------------
+	// ASN.1 			=> 30 46 02 [rLength] [r] 02 [sLength] [s]
+	// IEEE.P1363 => [r] [s]
+
+  const rLength = parseInt(signature.substr(6, 2), 16) * 2;
+  let r = signature.substr(6 + 2, rLength);
+  let s = signature.substr(6 + 2 + rLength + 2 + 2);
+  r = r.padStart(64, '0').substr(-64);
+  s = s.padStart(64, '0').substr(-64);
+
+	return Buffer.from(r + s, 'hex');
 }
 
 // ------------------------------------------------------------------------
@@ -265,16 +302,9 @@ function push(pub, sub, data) {
   cipher.final();
 
   // ------------------------------------------------------------------------
-  // https://datatracker.ietf.org/doc/html/rfc5349.html#section-7
-  // ------------------------------------------------------------------------
-  
-  let privateKey = JSON.parse(JSON.stringify(pub.key)); 
-  privateKey.dsaEncoding = 'ieee-p1363';
-  
-  // ------------------------------------------------------------------------
 
   const endpoint = url.parse(sub.endpoint),
-        jwt = VAPID_jwt(privateKey, endpoint, pub.subject, 12 * 60 * 60);
+        jwt = VAPID_jwt(pub.key, endpoint, pub.subject, 12 * 60 * 60);
 
   cipher = Buffer.concat([ ecch, data, cipher.getAuthTag() ]);
 
